@@ -161,10 +161,12 @@ imp <- data.frame("analysis.var" =c("fdinsec",
                                     "r_lbw", 
                                     "fpl200",
                                     "snap", 
+                                    "instot",
                                     "shcb",
                                     "ruralpop_pct" 
 ),
-"mult.fact"=c(6,3,2,3,3,3,4,4))
+"mult.fact"=c(6,3,2,3,1,3,3,4,8))
+#"mult.fact"=c(1,1,1,1,1,1,1,1))
 
 #View(imp)
 wt.all.1 <- merge(x = imp, y = wt.all.agg, by = "analysis.var", all = TRUE)
@@ -260,7 +262,7 @@ glimpse(col.replicates)
 
 
 
-
+# Kmeans ----
 
 # read in weighted data
 wgtdata <- read_csv('./Data/5. DatasetForcluster.csv') %>% 
@@ -278,6 +280,134 @@ unwgtdata <- read_csv('./Data/2. Unweighted data.csv') %>%
 
 unwgtdata_clean <- select_if(.tbl = unwgtdata, is.numeric) %>% 
   filter(complete.cases(wgtdata))
+
+# Kmeans
+ncores <- detectCores() - 2
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+set.seed(123)
+results_kmeans <- foreach(k = 2:20) %dopar% {
+  kmeans(wgtdata_clean, k)$cluster
+}
+
+
+#View(model_output)
+
+# Optimal number of clusters
+# Total within sum of squares
+fviz_nbclust(wgtdata_clean, kmeans, method = "wss", k.max = 20)
+# Silhouette score
+fviz_nbclust(wgtdata_clean, kmeans, method = "silhouette", k.max = 20)
+
+km.res <- kmeans(wgtdata_clean, 8, nstart = 25)
+fviz_cluster(km.res, wgtdata_clean, frame = FALSE, geom = "point")
+
+set.seed(123)
+#k.res <- fit_kmeans(data = wgtdata_clean, centers = 8, nstart = 25)
+k.res <- kmeans(wgtdata_clean, centers = 8, nstart = 25)
+
+# read in non-normalized data
+rawdata <- read_csv('./Data/Non-normalized data.csv') %>% 
+  mutate(fips = as.character(fips)) %>% 
+  mutate(fips = str_pad(fips, 5, pad = "0"))
+
+# attach cluster number to each county
+clusterdata <- rawdata %>%
+  mutate(group = k.res$cluster)
+
+# output a means table with a count of the counties in each cluster
+means <- clusterdata %>% 
+  group_by(group) %>% 
+  dplyr::add_count(group) %>% 
+  select(group, n, fdinsec:hh65) %>% 
+  dplyr::summarize_all(funs(mean)) %>% 
+  arrange(-fdinsec) %>% 
+  mutate(Min = min())
+  #mutate(weight = c(6,3,4,1,2,1,3,1,3,1,1,3,1,4,1,4,1,1,1,1,1,1,1,1,4,1,1))
+
+means[nrow(means) + 1,] = list('Variable Weight','NA','6','3','4','1','2','1','3','1','3','1','1','3','1',
+                               '4','1','4','1','1','1','1','1','1','1','4','1','1')
+# manually transpose this data
+write_csv(means, path = "Output/1. Cluster means.csv")
+
+
+# Map of cluster ----
+library(urbnthemes)
+library(urbnmapr)
+library(stringr)
+set_urban_defaults(style = "map")
+
+temp <- clusterdata %>% 
+  group_by(group) %>% 
+  select(group, fdinsec) %>% 
+  dplyr::summarize_all(funs(mean)) %>% 
+  arrange(-fdinsec) 
+
+temp$new_group <- c(1:8)
+
+clusterdata <- clusterdata %>% 
+  left_join(select(temp, group, new_group), by = "group")
+
+peergroups <- clusterdata %>% 
+  select(cluster = new_group , county_fips = fips)
+
+peermap <- left_join(peergroups, counties, by = "county_fips")
+glimpse(peermap)
+
+
+# Each 
+# aes_string is for functions
+# 
+peermap %>% 
+    ggplot(aes(long, lat, group = group, fill = factor(cluster))) +
+    geom_polygon(color = NA, size = 0.05) +
+    geom_polygon(data = states, mapping = aes(long, lat, group = group), fill = NA, color = 'gray') +
+    facet_wrap(~ cluster) +
+    coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+    scale_fill_discrete() +
+    theme(legend.position = "right",
+          legend.direction = "vertical",
+          legend.title = element_text(face = "bold", size = 11),
+          legend.key.height = unit(.2, "in")) +
+    labs(fill = "Cluster")
+
+ggsave(paste0("Maps/Facet Cluster Map", ".png"), width = 12, height = 11, units = "in")
+
+urbanblue <- c("#CFE8F3","#A2D4EC","#73BFE2","#46ABDB","#1696D2","#12719E","#0A4C6A","#062635")
+urbanpink <- c("#F5CBDF","#EB99C2","#E46AA7","#E54096","#EC008B","#AF1F6B","#761548","#351123")
+urbanyellow <- c("#FFF2CF","#FCE39E","#FDD870","#FCCB41","#FDBF11","#E88E2D","#CA5800","#843215")
+urbangreen <- c("#DCEDD9","#BCDEB4","#98CF90","#78C26D","#55B748","#408941","#2C5C2D","#1A2E19")
+blueandpink <- c("#CFE8F3", "#EB99C2","#73BFE2", "#E54096","#1696D2","#AF1F6B","#0A4C6A","#351123")
+blueandgreen <- c("#CFE8F3", "#BCDEB4","#73BFE2", "#78C26D","#1696D2","#408941","#0A4C6A","#1A2E19")
+bluetoyellow <- c("#062635","#0A4C6A","#12719E","#1696D2","#E88E2D","#FDBF11","#FCCB41","#FDD870")
+custom <- c("#0A4C6A", "#FDD870", "#2C5C2D", "#73BFE2","#FDBF11","#FCCB41", "#408941","#CFE8F3")
+
+
+peermap %>% 
+  ggplot(aes(long, lat, group = group, fill = factor(cluster))) +
+  geom_polygon(color = NA, size = 0.05) +
+  geom_polygon(data = states, mapping = aes(long, lat, group = group), fill = NA, color = 'white') +
+  coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  scale_fill_manual(values = rev(urbanblue)) +
+  theme(legend.position = "right",
+        legend.direction = "vertical",
+        legend.title = element_text(face = "bold", size = 11),
+        legend.key.height = unit(.2, "in")) +
+  labs(fill = "Cluster")
+
+ggsave(paste0("Maps/Blue Cluster Map", ".png"), width = 12, height = 9, units = "in")
+
+
+
+
+
+
+
+
+
+
+
 
 
 # DBSCAN ----
@@ -334,9 +464,9 @@ ncores <- detectCores() - 2
 cl <- makeCluster(ncores)
 registerDoParallel(cl)
 
-num_results <- 80
+num_results <- 60
 results <- foreach(pt = 4:5, .combine = 'c') %:% 
-  foreach(ep = 20:60) %dopar% {
+  foreach(ep = 15:45) %dopar% {
     library(dbscan)
     ep1 <- ep
     dbscan(wgtdata_clean, eps = ep1, minPts = pt)
@@ -370,7 +500,7 @@ silhouette_score <- foreach(i = 1:19) %dopar% {
   if (is.null(results_dbscan[[i]])) { score <- NA } else {
     s <- silhouette(results_dbscan[[i]],dist_m)
     score <- mean(s[,3])
-    }
+  }
   score
 }
 
@@ -389,7 +519,7 @@ ggplot(sil_score, mapping = aes(x = n_groups, y = silhouette_score)) +
        y = "Score")
 
 
-num_groups = 12
+num_groups = 7
 #sub1 <- sub %>% mutate(group = groups[[num_groups - 1]], fips = pull(tc %>% select(fips)), County = pull(tc %>% select(County)), MemberID = pull(tc %>% select(MemberID)), MemberName = pull(tc %>% select(MemberName))) %>% arrange(group)
 clusterdata <- wgtdata_clean %>%
   mutate(group = results_dbscan[[num_groups-1]], fips = pull(wgtdata %>% select(fips))) %>%
@@ -398,35 +528,3 @@ clusterdata <- wgtdata_clean %>%
 table(clusterdata$group)
 
 
-
-# Map of cluster ----
-library(urbnthemes)
-library(urbnmapr)
-library(stringr)
-# set_urban_defaults(style = "map")
-setnames(counties, 'county_fips', 'fips')
-
-peergroups <- sub1 %>% 
-  select(group, fips) %>% 
-  mutate(fips = as.character(fips)) %>% 
-  mutate(fips = str_pad(fips, 5, pad = "0")) %>% 
-  rename(clustergroup = group) %>% 
-  mutate(clustergroup = as.numeric(clustergroup))
-
-peermap <- left_join(peergroups, counties, by = "fips")
-glimpse(peermap)
-
-map <- function(fill_var, label_nm) {
-  peergroups %>% 
-    fill_cut <- factor(fill_var[1:10]) %>% 
-      ggplot(aes_string("long", "lat", group = "group", fill = fill_cut)) +
-      geom_polygon(color = "#ffffff", size = 0.05) +
-      coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
-      scale_fill_discrete() +
-      theme(legend.position = "right",
-            legend.direction = "vertical",
-            legend.title = element_text(face = "bold", size = 11),
-            legend.key.height = unit(.2, "in")) +
-      labs(fill = label_nm)
-    ggsave(paste0("./Maps/", fill_var, ".png"), width = 12, height = 9, units = "in")
-}
