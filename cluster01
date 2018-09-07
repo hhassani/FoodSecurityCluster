@@ -1,0 +1,152 @@
+set more off
+capture log close
+clear all
+display "$S_TIME  $S_DATE"
+set linesize 255 
+
+global path "K:\LHP\CRatclif\WalmartFI2018\Dataprep\"
+global datapath K:\LHP\CRatclif\WalmartFI2018\Dataprep\Data
+global output ${path}Cluster\Output
+
+global log "K:\LHP\CRatclif\WalmartFI2018\Dataprep\Cluster\Log"
+log using "${log}\clusterprep01_$S_DATE.log", replace
+
+cd ${datapath}
+*pull in imputed dataset with only one copy of each observation (no original m zero data)
+use food05.dta, clear
+count
+
+global metrics26 ///
+	fdinsec fdinsec_cd pctlimfood /// food
+	disab diabetic mort r_lbw /// health
+	medinc fpl200 gini /// income
+	unemprate_16 /// employment
+	snap instot /// benefit receipt
+	shcb wage2bdfmr /// housing
+	medcredscr pctcoll pctmedcoll avgunsecure /// fin health
+	transinc_r /// transpo 
+	ltehs /// education
+	foreign /// immigration
+	pctwnh ruralpop_pct /// population
+	hhkids hh65 // household composition
+	
+keep $metrics26 pctnw county year fips state missflag
+sum $metrics26
+
+*special case: trim avgunsecure
+histogram avgunsecure 
+histogram avgunsecure if avgunsecure < 19299
+sum avgunsecure,d
+sum avgunsecure if avgunsecure > 19299, d
+*replace the top quarter percent of values with the 99.5th percentile value
+xtile pc_avgunsecure = avgunsecure, nq(400)
+sum pc_avgunsecure, d
+sum avgunsecure if pc_avgunsecure == 398
+local avgunsecure_max = r(max)
+sum avgunsecure if pc_avgunsecure == 400
+replace avgunsecure = `avgunsecure_max' if pc_avgunsecure == 399 | pc_avgunsecure == 400
+sum avgunsecure, d
+histogram avgunsecure
+
+/*Trimming
+foreach var in $metrics26 {
+	gen pc_`var'=.
+	xtile pc_`var'`i'=`var' if year==`i', nq(200)
+	replace pcw_networth=pc_`var'`i' if year==`i'
+	sum pc_`var', d
+	drop if pc_`var'==1 | pc_`var'==100
+}
+*/
+
+
+*change so all vars between 0 and 100
+*mutliply these by 100
+foreach var in fdinsec fdinsec_cd disab fpl200 gini snap instot shcb pctcoll pctmedcoll ltehs foreign pctwnh pctnw hhkids hh65 {
+	replace `var' = `var'*100
+	sum `var'
+}
+*special case: mortality, divide by 10
+sum mort
+replace mort = mort/10
+sum mort
+
+*cube root transformation for right skewed vars
+foreach var in pctlimfood wage2bdfmr foreign pctnw unemprate_16 {
+	g `var'_cube = `var'^(1/3)
+	sum `var' `var'_cube
+}
+
+*try poisson dist (Anscombe transf) for wage2bdfmr
+g wage2bdfmr_ans = 2*(wage2bdfmr+(3/8))^(1/2)
+sum wage2bdfmr wage2bdfmr_ans 
+
+g wage2bdfmr_ln = ln(wage2bdfmr)
+sum wage2bdfmr wage2bdfmr_ln
+
+g wage2bdfmr_sq = wage2bdfmr^(1/2)
+sum wage2bdfmr wage2bdfmr_sq
+
+g wage2bdfmr_4 = wage2bdfmr^(1/4)
+sum wage2bdfmr wage2bdfmr_4
+
+*All pretty much the same; go with cube root to be consistent with other vars
+
+/*
+g pctnw_ln = ln(pctnw)
+sum pctnw pctnw_ln
+histogram pctnw_ln
+*/
+global transfvars ///
+	fdinsec fdinsec_cd pctlimfood /// food
+	disab diabetic mort r_lbw /// health
+	medinc fpl200 gini /// income
+	unemprate_16 /// employment
+	snap instot /// benefit receipt
+	shcb wage2bdfmr /// housing
+	medcredscr pctcoll pctmedcoll avgunsecure /// fin health
+	transinc_r /// transpo 
+	ltehs /// education
+	foreign /// immigration
+	pctwnh pctnw ruralpop_pct /// population
+	hhkids hh65 /// household composition
+	pctlimfood_cube wage2bdfmr_cube foreign_cube pctnw_cube unemprate_16_cube // cubes
+	*wage2bdfmr_ans wage2bdfmr_ln wage2bdfmr_sq wage2bdfmr_4 // housing wage other
+
+*General multiplier formula to get values between 0 and 100
+foreach var in $transfvars {
+	sum `var'
+	return list
+	g `var'_norm = `var' - r(min)
+	sum `var'_norm
+	return list
+	g mult_`var' = 100/r(max)
+	replace `var'_norm = `var'_norm*mult_`var'
+	sum `var'_norm
+}
+
+sum $transfvars 
+sum *_norm
+
+
+cd $output
+foreach var in $transfvars {
+	histogram `var'_norm, frequency
+	graph export `var'.png, replace
+}
+
+
+keep fips county *_norm
+destring fips, replace
+rename *_norm *
+drop pctlimfood wage2bdfmr foreign pctnw pctwnh unemprate_16
+rename *_cube *
+
+sum
+*save data as a csv to read into R
+export delim using "K:\LHP\CRatclif\WalmartFI2018\Dataprep\Cluster\Output\2. Unweighted data.csv", replace
+export delim using "D:\RCluster\Data\2. Unweighted data.csv", replace
+
+
+
+
+log close
