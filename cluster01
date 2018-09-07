@@ -33,6 +33,23 @@ global metrics26 ///
 keep $metrics26 pctnw county year fips state missflag
 sum $metrics26
 
+*change so all vars between 0 and 100
+*mutliply these by 100
+foreach var in fdinsec fdinsec_cd disab fpl200 gini snap instot shcb pctcoll pctmedcoll ltehs foreign pctwnh pctnw hhkids hh65 {
+	replace `var' = `var'*100
+	sum `var'
+}
+
+*export non-normalized vars to csv to read into R
+global finalvars ///
+	fdinsec fdinsec_cd pctlimfood disab diabetic mort r_lbw medinc fpl200 gini unemprate_16 snap instot shcb wage2bdfmr medcredscr pctcoll pctmedcoll avgunsecure transinc_r ltehs foreign pctnw ruralpop_pct hhkids hh65 
+preserve
+keep $finalvars fips county state
+sum
+export delim using "D:\RCluster\Data\Non-normalized data.csv", replace
+restore
+
+
 *special case: trim avgunsecure
 histogram avgunsecure 
 histogram avgunsecure if avgunsecure < 19299
@@ -59,12 +76,7 @@ foreach var in $metrics26 {
 */
 
 
-*change so all vars between 0 and 100
-*mutliply these by 100
-foreach var in fdinsec fdinsec_cd disab fpl200 gini snap instot shcb pctcoll pctmedcoll ltehs foreign pctwnh pctnw hhkids hh65 {
-	replace `var' = `var'*100
-	sum `var'
-}
+
 *special case: mortality, divide by 10
 sum mort
 replace mort = mort/10
