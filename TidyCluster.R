@@ -157,15 +157,12 @@ wt.all.agg <- aggregate(reps~analysis.var, wt.all.0 ,sum)
 # HH: We pick n. Number of rows with suggested weight in comment following var
 imp <- data.frame("analysis.var" =c("fdinsec",
                                     "fdinsec_cd",
-                                    "diabetic",
-                                    "r_lbw", 
-                                    "fpl200",
-                                    "snap", 
-                                    "instot",
                                     "shcb",
+                                    "hcb",
                                     "ruralpop_pct" 
 ),
-"mult.fact"=c(6,3,2,3,1,3,3,4,8))
+"mult.fact"=c(6,3,2,2,4))
+#"mult.fact"=c(6,3,2,3,1,3,3,4,8))
 #"mult.fact"=c(1,1,1,1,1,1,1,1))
 
 #View(imp)
@@ -300,12 +297,9 @@ fviz_nbclust(wgtdata_clean, kmeans, method = "wss", k.max = 20)
 # Silhouette score
 fviz_nbclust(wgtdata_clean, kmeans, method = "silhouette", k.max = 20)
 
-km.res <- kmeans(wgtdata_clean, 8, nstart = 25)
-fviz_cluster(km.res, wgtdata_clean, frame = FALSE, geom = "point")
-
 set.seed(123)
-#k.res <- fit_kmeans(data = wgtdata_clean, centers = 8, nstart = 25)
-k.res <- kmeans(wgtdata_clean, centers = 8, nstart = 25)
+km.res <- kmeans(wgtdata_clean, centers = 10, nstart = 25)
+fviz_cluster(km.res, wgtdata_clean, frame = FALSE, geom = "point")
 
 # read in non-normalized data
 rawdata <- read_csv('./Data/Non-normalized data.csv') %>% 
@@ -314,22 +308,117 @@ rawdata <- read_csv('./Data/Non-normalized data.csv') %>%
 
 # attach cluster number to each county
 clusterdata <- rawdata %>%
-  mutate(group = k.res$cluster)
+  mutate(group = km.res$cluster)
 
 # output a means table with a count of the counties in each cluster
 means <- clusterdata %>% 
   group_by(group) %>% 
   dplyr::add_count(group) %>% 
-  select(group, n, fdinsec:hh65) %>% 
+  select(group, n, fdinsec:hh65yrs) %>% 
   dplyr::summarize_all(funs(mean)) %>% 
-  arrange(-fdinsec) %>% 
-  mutate(Min = min())
-  #mutate(weight = c(6,3,4,1,2,1,3,1,3,1,1,3,1,4,1,4,1,1,1,1,1,1,1,1,4,1,1))
+  arrange(-fdinsec)
 
-means[nrow(means) + 1,] = list('Variable Weight','NA','6','3','4','1','2','1','3','1','3','1','1','3','1',
-                               '4','1','4','1','1','1','1','1','1','1','4','1','1')
+means[nrow(means) + 1,] = list('Variable Weight','NA','6','3','4','1','1','1','1','1','1','1','1','1','1',
+                               '2','2','1','1','1','1','1','1','1','1','1','4','1','1')
 # manually transpose this data
-write_csv(means, path = "Output/1. Cluster means.csv")
+write_csv(means, path = "Output/1. Cluster means_9-12-18.csv")
+
+# Validate cluster stability ----
+ncores <- detectCores() - 2
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+sub <- wgtdata_clean %>% 
+  rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
+num_groups <- 10
+cluster_all <- results_kmeans[[num_groups - 1]]
+
+one_col_stability <- function(thecol, mult1){
+  compare_results <- function(data_a, data_b){
+    library(tidyverse)
+    if (!is.null(data_b)){ # sometimes DBSCAN may not have a value
+      temp <- tibble(data_a, data_b)
+      summary <- temp %>% group_by(data_a, data_b) %>% summarise(count = n())
+      maximums <- summary %>% group_by(data_b) %>% summarise(max = max(count)) %>% mutate(max = as.integer(max))
+      summary_filter <- summary %>% left_join(maximums, by = "data_b") %>% filter(count == max) %>% ungroup() %>% distinct(data_b, max,.keep_all=TRUE) %>% select(-max, -count) %>% rename(target = data_a)
+      temp_out <- temp %>% left_join(summary_filter, by = "data_b")
+      temp_out$target
+    }
+    else{ data_b }
+  }
+  library(tidyverse)
+  library(factoextra)
+  library(dbscan)
+  library(mclust)
+  # results_hier <- vector("list", 19)
+  if (mult1 == FALSE){ # If it's a single variable
+    tcol <- as.name(thecol)
+    #sub <- wgtdata %>% select( -fips, -county, -(!!tcol))
+    sub <- wgtdata_clean %>% 
+      rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
+    for (i in 1:20){
+      if (paste0(thecol,".",i) %in% colnames(sub)){
+        tcol <- as.name(paste0(thecol,".",i))
+        sub <- sub %>% select(-(!!tcol))
+      }
+    }
+  } else { # If it's a list of binary variables
+    sub <- wgtdata_clean %>% 
+      rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
+    for (col in thecol){
+      tcol <- as.name(col)
+      sub <- sub %>% select(-(!!tcol))
+    }
+  }
+
+  # KMeans Function
+  results_kmeans <- foreach(k = 2:20) %dopar% {
+    kmeans(sub, k)$cluster
+  }
+
+  tgroup <- results_kmeans[[num_groups - 1]]
+  comp_tgroup <- compare_results(cluster_all, tgroup)
+  temp_df <- tibble(cluster_all, comp_tgroup) %>% mutate(equals = (cluster_all == comp_tgroup)) %>% select(equals) %>% pull()
+  sum(temp_df)
+}
+
+orig_cols <- colnames(sub)
+
+multiples <- c()
+all_cols <- c()
+for (col in orig_cols){
+  if (length(strsplit(col,"_")[[1]]) == 1){
+    all_cols <- c(all_cols,col)
+  }
+}
+nums <- lapply(0:9, as.character)
+keep_cols <- c()
+col_similarity <- c()
+all_cols_list <- list()
+for (z in seq(all_cols)){
+  col_ending <- str_sub(all_cols[[z]], -1)
+  col_ending2 <- str_sub(all_cols[[z]], -5)
+  if (!col_ending %in% nums){
+    keep_cols <- c(keep_cols, all_cols[[z]])
+    ab <- length(all_cols_list)
+    all_cols_list[[ab+1]] <- all_cols[[z]]
+  }
+}
+
+col_similarity <- c()
+for (y in all_cols_list){
+  print(y)
+  col_similarity <- c(col_similarity, one_col_stability(y, FALSE)) 
+}
+
+data <- tibble(keep_cols, col_similarity) %>%
+  arrange(col_similarity) %>%
+  mutate(pctchange = (3142-col_similarity)/3142) %>% 
+  rename("Column Name" = keep_cols, "Members in Same Group" = col_similarity, "Percent of counties that change groups" = pctchange)
+write.csv(data, './Data/10. Stability Scores.csv', row.names=FALSE)
+
+stopCluster(cl)
+
 
 
 # Map of cluster ----
