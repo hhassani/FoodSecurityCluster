@@ -288,6 +288,48 @@ results_kmeans <- foreach(k = 2:20) %dopar% {
   kmeans(wgtdata_clean, k)$cluster
 }
 
+# iterate seed
+results_kmeans_iterated <- foreach(i = 100:1000) %dopar% {
+  library(cluster)
+  set.seed(i)
+  km <- kmeans(wgtdata_clean, 10)$cluster
+}
+
+dist_m <- dist(wgtdata_clean, method = "euclidean")
+silhouette_score <- foreach (i = 1:901) %dopar% {
+  library(cluster)
+  print(results_kmeans_iterated[[i]])
+  s <- silhouette(results_kmeans_iterated[[i]],dist_m)
+  suppressWarnings(if (is.na(s)){ score <- 0 } else { score <- mean(s[,3]) })
+  score
+}
+n_seeds <- 100:1000
+silhouette_score <- unlist(silhouette_score)
+sil_score <- tibble(n_seeds,silhouette_score)
+result_10clusters <- ggplot(sil_score, mapping = aes(x = n_seeds, y = silhouette_score)) + 
+  geom_line() + 
+  expand_limits(y=0) + 
+  labs(title = "Goodness of fit",
+       subtitle = "Average Silhouette Score",
+       caption = "Urban Institute",
+       x = "Seed",
+       y = "Average Score")
+
+n_groups <- 2:20
+sil_10 <- sil_score %>%
+  dplyr::summarize(
+    min = min(silhouette_score), 
+    max = max(silhouette_score),
+    avg = mean(silhouette_score)
+    )
+
+# pull highest seed for number of clusters specified
+sil_score %>% 
+  arrange(-silhouette_score)
+# seed = 409
+
+# https://cran.r-project.org/web/packages/broom/vignettes/kmeans.html
+
 
 #View(model_output)
 
@@ -297,7 +339,7 @@ fviz_nbclust(wgtdata_clean, kmeans, method = "wss", k.max = 20)
 # Silhouette score
 fviz_nbclust(wgtdata_clean, kmeans, method = "silhouette", k.max = 20)
 
-set.seed(123)
+set.seed(409)
 km.res <- kmeans(wgtdata_clean, centers = 10, nstart = 25)
 fviz_cluster(km.res, wgtdata_clean, frame = FALSE, geom = "point")
 
@@ -320,8 +362,50 @@ means <- clusterdata %>%
 
 means[nrow(means) + 1,] = list('Variable Weight','NA','6','3','4','1','1','1','1','1','1','1','1','1','1',
                                '2','2','1','1','1','1','1','1','1','1','1','4','1','1')
+
 # manually transpose this data
 write_csv(means, path = "Output/1. Cluster means_9-12-18.csv")
+
+
+
+# Try hierarchical ----
+library(factoextra)
+sub <- wgtdata_clean
+results_hier <- foreach(k = 2:20) %dopar% {
+  library(factoextra)
+  hcut(sub, k)$cluster
+}
+
+dist_m <- dist(sub, method = "euclidean")
+silhouette_score <- foreach (i = 1:19) %dopar% {
+  library(cluster)
+  print(results_hier[[i]])
+  s <- silhouette(results_hier[[i]],dist_m)
+  suppressWarnings(if (is.na(s)){ score <- 0 } else { score <- max(s[,3]) })
+  score
+}
+
+n_groups <- 2:20
+silhouette_score <- unlist(silhouette_score)
+sil_score <- tibble(n_groups,silhouette_score)
+#result <- 
+ggplot(sil_score, mapping = aes(x = n_groups, y = silhouette_score)) + 
+  geom_line() + 
+  expand_limits(y=0) + 
+  labs(title = "Goodness of fit - Hierarchical clustering",
+       subtitle = "Average Silhouette Score",
+       caption = "Urban Institute",
+       x = "Number of Groups",
+       y = "Average Score")
+
+hierclusters_means <- foreach(i = 2:20) %dopar% {
+  mean(results_hier[[i-1]])
+}
+
+hc <- hclust(dist(wgtdata_clean))
+plot(hc)
+
+
 
 # Validate cluster stability ----
 ncores <- detectCores() - 2
@@ -372,7 +456,9 @@ one_col_stability <- function(thecol, mult1){
   }
 
   # KMeans Function
+  set.seed(409)
   results_kmeans <- foreach(k = 2:20) %dopar% {
+    set.seed(409)
     kmeans(sub, k)$cluster
   }
 
@@ -414,10 +500,12 @@ for (y in all_cols_list){
 data <- tibble(keep_cols, col_similarity) %>%
   arrange(col_similarity) %>%
   mutate(pctchange = (3142-col_similarity)/3142) %>% 
-  rename("Column Name" = keep_cols, "Members in Same Group" = col_similarity, "Percent of counties that change groups" = pctchange)
+  rename("Column Name" = keep_cols, "Members in Same Group" = col_similarity, "% counties change groups" = pctchange)
 write.csv(data, './Data/10. Stability Scores.csv', row.names=FALSE)
 
 stopCluster(cl)
+
+
 
 
 
