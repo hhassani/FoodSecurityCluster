@@ -11,7 +11,7 @@ packages <- lapply(packages, FUN = function(x) {
 # devtools::install_github("hadley/multidplyr")
 
 library(urbnthemes)
-set_urban_defaults(style = "print")
+#set_urban_defaults(style = "print")
 
 # Steps
 # 1. Weight the input variables
@@ -159,9 +159,10 @@ imp <- data.frame("analysis.var" =c("fdinsec",
                                     "fdinsec_cd",
                                     "shcb",
                                     "hcb",
-                                    "ruralpop_pct" 
+                                    "ruralpop_pct",
+                                    "pctlimfood"
 ),
-"mult.fact"=c(6,3,2,2,4))
+"mult.fact"=c(6,3,2,2,4,.5))
 #"mult.fact"=c(6,3,2,3,1,3,3,4,8))
 #"mult.fact"=c(1,1,1,1,1,1,1,1))
 
@@ -278,6 +279,226 @@ unwgtdata <- read_csv('./Data/2. Unweighted data.csv') %>%
 unwgtdata_clean <- select_if(.tbl = unwgtdata, is.numeric) %>% 
   filter(complete.cases(wgtdata))
 
+# read in non-normalized data
+rawdata <- read_csv('./Data/Non-normalized data.csv') %>% 
+  mutate(fips = as.character(fips)) %>% 
+  mutate(fips = str_pad(fips, 5, pad = "0"))
+
+
+# Kmeans ----
+ncores <- detectCores() - 2
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+#set.seed(123)
+#results_kmeans <- foreach(k = 2:20) %dopar% {
+ # kmeans(wgtdata_clean, k)$cluster
+#}
+
+#calc_sil <- function()
+# iterate seed
+results_kmeans_iterated <- foreach(i = 100:1100) %dopar% {
+  library(cluster)
+  set.seed(i)
+  km <- kmeans(wgtdata_clean, 7, iter.max = 25)$cluster
+}
+
+dist_m <- dist(wgtdata_clean, method = "euclidean")
+silhouette_score <- foreach (i = 1:1001) %dopar% {
+  library(cluster)
+  print(results_kmeans_iterated[[i]])
+  s <- silhouette(results_kmeans_iterated[[i]],dist_m)
+  suppressWarnings(if (is.na(s)){ score <- 0 } else { score <- mean(s[,3]) })
+  score
+}
+n_seeds <- 100:1100
+silhouette_score <- unlist(silhouette_score)
+sil_score <- tibble(n_seeds,silhouette_score)
+ggplot(sil_score, mapping = aes(x = n_seeds, y = silhouette_score)) + 
+  geom_line() + 
+  expand_limits(y=0) + 
+  labs(title = "Goodness of fit - kmeans, 7 clusters",
+       subtitle = "Average Silhouette Score",
+       caption = "Urban Institute",
+       x = "Seed",
+       y = "Average Score")
+
+sil_7 <- sil_score %>%
+  dplyr::summarize(
+    min = min(silhouette_score), 
+    max = max(silhouette_score),
+    avg = mean(silhouette_score)
+  ) 
+  
+
+# pull highest seed for number of clusters specified
+sil_score %>% 
+  arrange(-silhouette_score)
+# Best seeds (350-350):
+# 7 clusters: 367
+# 8 clusters: 356
+# 9 clusters: 356
+# 10 clusters: 434
+# 11 clusters: 367
+# 12 clusters: 400
+# 13 clusters: 355
+# 14 clusters: 351
+# 15 clusters: 386
+
+sil_scores <- rbind(sil_7, sil_8, sil_9, sil_10, sil_11, sil_12, sil_13, sil_14, sil_15) %>% 
+  mutate(k = 7:15)
+str(sil_scores)
+
+# plot of average sil scores
+ggplot(sil_scores, mapping = aes(x = k, y = avg, labels = avg)) + 
+  geom_line() + 
+  geom_label(aes(label = round(avg, digits = 3)), nudge_x = .1, nudge_y = .01, size = 3.5, label.size = NA) +
+  expand_limits(y=0) + 
+  labs(title = "Goodness of fit - kmeans, 7-15 clusters",
+       subtitle = "Average Silhouette Score across 100 seeds",
+       caption = "Urban Institute",
+       x = "Seed",
+       y = "Average Score")
+
+ggplot(sil_scores, mapping = aes(x = k, y = max, labels = max)) + 
+  geom_line() + 
+  geom_label(aes(label = round(max, digits = 3)), nudge_x = .1, nudge_y = .01, size = 3.5, label.size = NA) +
+    expand_limits(y=0) + 
+  labs(title = "Goodness of fit - kmeans, 7-15 clusters",
+       subtitle = "Maximum Silhouette Score across 100 seeds",
+       caption = "Urban Institute",
+       x = "Seed",
+       y = "Average Score")
+
+
+
+# https://cran.r-project.org/web/packages/broom/vignettes/kmeans.html
+# Kmeans using map and broom ----
+# See here for helpful kmeans code: https://uc-r.github.io/kmeans_clustering#kmeans
+
+# Set up function that runs the kmeans model
+fit_kmeans <- function(seed, data, centers, nstart, ...) {
+  # specifiy seed
+  set.seed(seed = seed)
+  # fits kmeans model with specficied data, centers, and nstart
+  kmeans(x = data, centers = centers, nstart = nstart)
+}
+
+# test the function with a single specification
+fit_kmeans(seed = 434, data = wgtdata_clean, centers = 3, nstart = 25) %>% 
+  glance()
+
+# create a grid of parameters for the clustering model
+# notice the nested data frame
+tuning_grid <- expand.grid(seed = 350:450, data = list(wgtdata), nstart = 25, centers = 2:20) %>%
+  mutate(model_number = row_number())
+  
+  model_output <- tuning_grid %>%
+  # iterate fit_kmeans over every row in the tuning grid
+  mutate(fits = pmap(list(seed, data, centers, nstart), fit_kmeans)) %>%
+  # extract tot.withinss
+  mutate(tot.withinss = map_dbl(fits, ~glance(.) %>% pull(tot.withinss)))
+
+#View(model_output)
+
+# Validate cluster stability - kmeans ----
+ncores <- detectCores() - 2
+cl <- makeCluster(ncores)
+registerDoParallel(cl)
+
+sub <- wgtdata_clean %>% 
+  rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
+num_groups <- 10
+cluster_all <- results_kmeans[[num_groups - 1]]
+
+one_col_stability <- function(thecol, mult1){
+  compare_results <- function(data_a, data_b){
+    library(tidyverse)
+    if (!is.null(data_b)){ # sometimes DBSCAN may not have a value
+      temp <- tibble(data_a, data_b)
+      summary <- temp %>% group_by(data_a, data_b) %>% summarise(count = n())
+      maximums <- summary %>% group_by(data_b) %>% summarise(max = max(count)) %>% mutate(max = as.integer(max))
+      summary_filter <- summary %>% left_join(maximums, by = "data_b") %>% filter(count == max) %>% ungroup() %>% distinct(data_b, max,.keep_all=TRUE) %>% select(-max, -count) %>% rename(target = data_a)
+      temp_out <- temp %>% left_join(summary_filter, by = "data_b")
+      temp_out$target
+    }
+    else{ data_b }
+  }
+  library(tidyverse)
+  library(factoextra)
+  library(dbscan)
+  library(mclust)
+  # results_hier <- vector("list", 19)
+  if (mult1 == FALSE){ # If it's a single variable
+    tcol <- as.name(thecol)
+    #sub <- wgtdata %>% select( -fips, -county, -(!!tcol))
+    sub <- wgtdata_clean %>% 
+      rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
+    for (i in 1:20){
+      if (paste0(thecol,".",i) %in% colnames(sub)){
+        tcol <- as.name(paste0(thecol,".",i))
+        sub <- sub %>% select(-(!!tcol))
+      }
+    }
+  } else { # If it's a list of binary variables
+    sub <- wgtdata_clean %>% 
+      rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
+    for (col in thecol){
+      tcol <- as.name(col)
+      sub <- sub %>% select(-(!!tcol))
+    }
+  }
+  
+  # KMeans Function
+  set.seed(409)
+  results_kmeans <- foreach(k = 2:20) %dopar% {
+    set.seed(409)
+    kmeans(sub, k)$cluster
+  }
+  
+  
+  tgroup <- results_kmeans[[num_groups - 1]]
+  comp_tgroup <- compare_results(cluster_all, tgroup)
+  temp_df <- tibble(cluster_all, comp_tgroup) %>% mutate(equals = (cluster_all == comp_tgroup)) %>% select(equals) %>% pull()
+  sum(temp_df)
+}
+
+orig_cols <- colnames(sub)
+
+multiples <- c()
+all_cols <- c()
+for (col in orig_cols){
+  if (length(strsplit(col,"_")[[1]]) == 1){
+    all_cols <- c(all_cols,col)
+  }
+}
+nums <- lapply(0:9, as.character)
+keep_cols <- c()
+col_similarity <- c()
+all_cols_list <- list()
+for (z in seq(all_cols)){
+  col_ending <- str_sub(all_cols[[z]], -1)
+  col_ending2 <- str_sub(all_cols[[z]], -5)
+  if (!col_ending %in% nums){
+    keep_cols <- c(keep_cols, all_cols[[z]])
+    ab <- length(all_cols_list)
+    all_cols_list[[ab+1]] <- all_cols[[z]]
+  }
+}
+
+col_similarity <- c()
+for (y in all_cols_list){
+  print(y)
+  col_similarity <- c(col_similarity, one_col_stability(y, FALSE)) 
+}
+
+data <- tibble(keep_cols, col_similarity) %>%
+  arrange(col_similarity) %>%
+  mutate(pctchange = (3142-col_similarity)/3142) %>% 
+  rename("Column Name" = keep_cols, "Members in Same Group" = col_similarity, "% counties change groups" = pctchange)
+write.csv(data, './Data/10. Stability Scores.csv', row.names=FALSE)
+
+stopCluster(cl)
 
 # Optimal number of clusters ----
 # Total within sum of squares
@@ -285,21 +506,19 @@ fviz_nbclust(wgtdata_clean, kmeans, method = "wss", k.max = 20)
 # Silhouette score
 fviz_nbclust(wgtdata_clean, kmeans, method = "silhouette", k.max = 20)
 
-set.seed(409)
-km.res <- kmeans(wgtdata_clean, centers = 10, nstart = 25)
+# best seed for 7 clusters: 367
+set.seed(367)
+km.res <- kmeans(wgtdata_clean, centers = 7, nstart = 25)
 fviz_cluster(km.res, wgtdata_clean, frame = FALSE, geom = "point")
-
-# read in non-normalized data
-rawdata <- read_csv('./Data/Non-normalized data.csv') %>% 
-  mutate(fips = as.character(fips)) %>% 
-  mutate(fips = str_pad(fips, 5, pad = "0"))
 
 # attach cluster number to each county
 clusterdata_kmeans <- rawdata %>%
   mutate(group = km.res$cluster)
 
+write_csv(clusterdata_kmeans, path = "Data/Cluster groups_kmeans7_9-14-18.csv")
+
 # output a means table with a count of the counties in each cluster
-means <- clusterdata %>% 
+means <- clusterdata_kmeans %>% 
   group_by(group) %>% 
   dplyr::add_count(group) %>% 
   select(group, n, fdinsec:hh65yrs) %>% 
@@ -310,7 +529,7 @@ means[nrow(means) + 1,] = list('Variable Weight','NA','6','3','4','1','1','1','1
                                '2','2','1','1','1','1','1','1','1','1','1','4','1','1')
 
 # manually transpose this data
-write_csv(means, path = "Output/1. Cluster means_9-12-18.csv")
+write_csv(means, path = "Output/1. Cluster means_km7_9-14-18.csv")
 
 
 
@@ -344,6 +563,9 @@ ggplot(sil_score, mapping = aes(x = n_groups, y = silhouette_score)) +
        x = "Number of Groups",
        y = "Average Score")
 
+sil_score %>% 
+  arrange(-silhouette_score)
+
 hierclusters_means <- foreach(i = 2:20) %dopar% {
   mean(results_hier[[i-1]])
 }
@@ -351,8 +573,6 @@ hierclusters_means <- foreach(i = 2:20) %dopar% {
 hc <- hclust(dist(wgtdata_clean))
 plot(hc)
 
-clusterdata <- rawdata %>%
-  mutate(group = km.res$cluster)
 
 # Stability analysis - hierarchical ----
 ncores <- detectCores() - 2
@@ -456,15 +676,15 @@ stopCluster(cl)
 # Export cluster data ----
 
 
-set.seed(409)
-h.res <- hcut(wgtdata_clean, 15)
+#set.seed(409)
+h.res <- hcut(wgtdata_clean, 7)
 
 # attach cluster number to each county
 clusterdata_hier <- rawdata %>%
   mutate(group = h.res$cluster)
 
 # export cluster data to do analysis in stata
-write_csv(clusterdata_hier, path = "Data/Cluster groups_hier_9-13-18.csv")
+write_csv(clusterdata_hier, path = "Output/Cluster groups_hier_9-14-18.csv")
 
 # output a means table with a count of the counties in each cluster
 means <- clusterdata_hier %>% 
@@ -474,11 +694,11 @@ means <- clusterdata_hier %>%
   dplyr::summarize_all(funs(mean)) %>% 
   arrange(-fdinsec)
 
-means[nrow(means) + 1,] = list('Variable Weight','NA','6','3','4','1','1','1','1','1','1','1','1','1','1',
+means[nrow(means) + 1,] = list('Variable Weight','NA','6','3','2','1','1','1','1','1','1','1','1','1','1',
                                '2','2','1','1','1','1','1','1','1','1','1','4','1','1')
 
 # manually transpose this data
-write_csv(means, path = "Output/1. Cluster means_hier_9-13-18.csv")
+write_csv(means, path = "Output/1. Cluster means_hier_9-14-18.csv")
 
 # Map of cluster ----
 library(urbnthemes)
@@ -545,195 +765,6 @@ peermap %>%
   labs(fill = "Cluster")
 
 ggsave(paste0("Maps/Blue Cluster Map", ".png"), width = 12, height = 9, units = "in")
-
-
-
-
-# Kmeans ----
-ncores <- detectCores() - 2
-cl <- makeCluster(ncores)
-registerDoParallel(cl)
-
-set.seed(123)
-results_kmeans <- foreach(k = 2:20) %dopar% {
-  kmeans(wgtdata_clean, k)$cluster
-}
-
-# iterate seed
-results_kmeans_iterated <- foreach(i = 100:1000) %dopar% {
-  library(cluster)
-  set.seed(i)
-  km <- kmeans(wgtdata_clean, 10)$cluster
-}
-
-dist_m <- dist(wgtdata_clean, method = "euclidean")
-silhouette_score <- foreach (i = 1:901) %dopar% {
-  library(cluster)
-  print(results_kmeans_iterated[[i]])
-  s <- silhouette(results_kmeans_iterated[[i]],dist_m)
-  suppressWarnings(if (is.na(s)){ score <- 0 } else { score <- mean(s[,3]) })
-  score
-}
-n_seeds <- 100:1000
-silhouette_score <- unlist(silhouette_score)
-sil_score <- tibble(n_seeds,silhouette_score)
-#result_10clusters <- 
-ggplot(sil_score, mapping = aes(x = n_seeds, y = silhouette_score)) + 
-  geom_line() + 
-  expand_limits(y=0) + 
-  labs(title = "Goodness of fit",
-       subtitle = "Average Silhouette Score",
-       caption = "Urban Institute",
-       x = "Seed",
-       y = "Average Score")
-
-n_groups <- 2:20
-sil_10 <- sil_score %>%
-  dplyr::summarize(
-    min = min(silhouette_score), 
-    max = max(silhouette_score),
-    avg = mean(silhouette_score)
-  )
-
-# pull highest seed for number of clusters specified
-sil_score %>% 
-  arrange(-silhouette_score)
-# seed = 409
-
-# https://cran.r-project.org/web/packages/broom/vignettes/kmeans.html
-# Kmeans using map and broom ----
-# See here for helpful kmeans code: https://uc-r.github.io/kmeans_clustering#kmeans
-
-set.seed(123)
-# Set up function that runs the kmeans model
-fit_kmeans <- function(data, centers, nstart, ...) {
-  # drop non-numeric vectors
-  input_data <- select_if(.tbl = data, is.numeric) %>%  
-    # only keeps complete observations - this shouldn't drop anything since we imputed
-    filter(complete.cases(data))
-  # fits kmeans model with specficied data, centers, and nstart
-  kmeans(x = input_data, centers = centers, nstart = nstart)
-}
-
-# test the function with a single specification
-fit_kmeans(data = wgtdata_clean, centers = 3, nstart = 5) %>% 
-  glance()
-
-# create a grid of parameters for the clustering model
-# notice the nested data frame
-tuning_grid <- expand.grid(data = list(wgtdata), nstart = 25, centers = 2:20) %>%
-  mutate(model_number = row_number()) %>% 
-  #mutate(km_seed = 100:1000)
-  
-  model_output <- tuning_grid %>%
-  # iterate fit_kmeans over every row in the tuning grid
-  mutate(fits = pmap(list(data, centers, nstart), fit_kmeans)) %>%
-  # extract tot.withinss
-  mutate(tot.withinss = map_dbl(fits, ~glance(.) %>% pull(tot.withinss)))
-
-#View(model_output)
-
-# Validate cluster stability - kmeans ----
-ncores <- detectCores() - 2
-cl <- makeCluster(ncores)
-registerDoParallel(cl)
-
-sub <- wgtdata_clean %>% 
-  rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
-num_groups <- 10
-cluster_all <- results_kmeans[[num_groups - 1]]
-
-one_col_stability <- function(thecol, mult1){
-  compare_results <- function(data_a, data_b){
-    library(tidyverse)
-    if (!is.null(data_b)){ # sometimes DBSCAN may not have a value
-      temp <- tibble(data_a, data_b)
-      summary <- temp %>% group_by(data_a, data_b) %>% summarise(count = n())
-      maximums <- summary %>% group_by(data_b) %>% summarise(max = max(count)) %>% mutate(max = as.integer(max))
-      summary_filter <- summary %>% left_join(maximums, by = "data_b") %>% filter(count == max) %>% ungroup() %>% distinct(data_b, max,.keep_all=TRUE) %>% select(-max, -count) %>% rename(target = data_a)
-      temp_out <- temp %>% left_join(summary_filter, by = "data_b")
-      temp_out$target
-    }
-    else{ data_b }
-  }
-  library(tidyverse)
-  library(factoextra)
-  library(dbscan)
-  library(mclust)
-  # results_hier <- vector("list", 19)
-  if (mult1 == FALSE){ # If it's a single variable
-    tcol <- as.name(thecol)
-    #sub <- wgtdata %>% select( -fips, -county, -(!!tcol))
-    sub <- wgtdata_clean %>% 
-      rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
-    for (i in 1:20){
-      if (paste0(thecol,".",i) %in% colnames(sub)){
-        tcol <- as.name(paste0(thecol,".",i))
-        sub <- sub %>% select(-(!!tcol))
-      }
-    }
-  } else { # If it's a list of binary variables
-    sub <- wgtdata_clean %>% 
-      rename("fdinsecchd" = fdinsec_cd, "transinc" = transinc_r, "rural" = ruralpop_pct)
-    for (col in thecol){
-      tcol <- as.name(col)
-      sub <- sub %>% select(-(!!tcol))
-    }
-  }
-
-  # KMeans Function
-  set.seed(409)
-  results_kmeans <- foreach(k = 2:20) %dopar% {
-    set.seed(409)
-    kmeans(sub, k)$cluster
-  }
-
-
-  tgroup <- results_kmeans[[num_groups - 1]]
-  comp_tgroup <- compare_results(cluster_all, tgroup)
-  temp_df <- tibble(cluster_all, comp_tgroup) %>% mutate(equals = (cluster_all == comp_tgroup)) %>% select(equals) %>% pull()
-  sum(temp_df)
-}
-
-orig_cols <- colnames(sub)
-
-multiples <- c()
-all_cols <- c()
-for (col in orig_cols){
-  if (length(strsplit(col,"_")[[1]]) == 1){
-    all_cols <- c(all_cols,col)
-  }
-}
-nums <- lapply(0:9, as.character)
-keep_cols <- c()
-col_similarity <- c()
-all_cols_list <- list()
-for (z in seq(all_cols)){
-  col_ending <- str_sub(all_cols[[z]], -1)
-  col_ending2 <- str_sub(all_cols[[z]], -5)
-  if (!col_ending %in% nums){
-    keep_cols <- c(keep_cols, all_cols[[z]])
-    ab <- length(all_cols_list)
-    all_cols_list[[ab+1]] <- all_cols[[z]]
-  }
-}
-
-col_similarity <- c()
-for (y in all_cols_list){
-  print(y)
-  col_similarity <- c(col_similarity, one_col_stability(y, FALSE)) 
-}
-
-data <- tibble(keep_cols, col_similarity) %>%
-  arrange(col_similarity) %>%
-  mutate(pctchange = (3142-col_similarity)/3142) %>% 
-  rename("Column Name" = keep_cols, "Members in Same Group" = col_similarity, "% counties change groups" = pctchange)
-write.csv(data, './Data/10. Stability Scores.csv', row.names=FALSE)
-
-stopCluster(cl)
-
-
-
 
 
 
