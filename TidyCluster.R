@@ -706,27 +706,32 @@ library(urbnmapr)
 library(stringr)
 set_urban_defaults(style = "map")
 
-temp <- clusterdata %>% 
+temp <- clusterdata_hier %>% 
   group_by(group) %>% 
   select(group, fdinsec) %>% 
   dplyr::summarize_all(funs(mean)) %>% 
   arrange(-fdinsec) 
 
-temp$new_group <- c(1:8)
+temp$new_group <- c(1:7)
 
 clusterdata <- clusterdata %>% 
   left_join(select(temp, group, new_group), by = "group")
 
+# group numbers arranged in descending food insecurity
 peergroups <- clusterdata %>% 
   select(cluster = new_group , county_fips = fips)
 
-peermap <- left_join(peergroups, counties, by = "county_fips")
+# original group numbers
+peergroups_orig <- clusterdata_hier %>% 
+  select(cluster = group, county_fips = fips)
+
+peermap <- left_join(peergroups_orig, counties, by = "county_fips")
 glimpse(peermap)
 
 
-# Each 
 # aes_string is for functions
-# 
+set_urban_defaults(style = "map")
+
 peermap %>% 
   ggplot(aes(long, lat, group = group, fill = factor(cluster))) +
   geom_polygon(color = NA, size = 0.05) +
@@ -740,7 +745,10 @@ peermap %>%
         legend.key.height = unit(.2, "in")) +
   labs(fill = "Cluster")
 
-ggsave(paste0("Maps/Facet Cluster Map", ".png"), width = 12, height = 11, units = "in")
+ggsave(paste0("Maps/Facet Cluster Map_hier7_9-14-18", ".png"), width = 12, height = 11, units = "in")
+
+
+
 
 urbanblue <- c("#CFE8F3","#A2D4EC","#73BFE2","#46ABDB","#1696D2","#12719E","#0A4C6A","#062635")
 urbanpink <- c("#F5CBDF","#EB99C2","#E46AA7","#E54096","#EC008B","#AF1F6B","#761548","#351123")
